@@ -228,6 +228,11 @@ pub(crate) struct BuildChunkedOCIOpts {
     /// it works to use over 200 layers.
     max_layers: Option<NonZeroU32>,
 
+    /// Prevent a change in packing structure by taking a previous build metadata (oci config and
+    /// manifest)
+    #[clap(long)]
+    previous_build_manifest: Option<Utf8PathBuf>,
+
     /// Tag to use for output image, or `latest` if unset.
     #[clap(long, default_value = "latest")]
     reference: String,
@@ -324,7 +329,11 @@ impl BuildChunkedOCIOpts {
         // Ensure we're in the proper namespace for container operations
         crate::containers_storage::reexec_if_needed()?;
 
-        let existing_manifest = self.check_existing_image(&self.output)?;
+        let existing_manifest = if self.previous_build_manifest.is_some() {
+            None
+        } else {
+            self.check_existing_image(&self.output)?
+        };
 
         let rootfs_source = if let Some(rootfs) = self.rootfs {
             FileSource::Rootfs(rootfs)
@@ -438,6 +447,14 @@ impl BuildChunkedOCIOpts {
         };
         let manifest_data = manifest_data_tmpfile.as_ref().map(|t| t.path());
 
+        // Use provided build manifest if provided, otherwise use manifest of chunked image
+        // already at target location if present.
+        let manifest_path = self
+            .previous_build_manifest
+            .as_ref()
+            .map(|m| m.as_os_str())
+            .or_else(|| manifest_data.map(|m| m.as_os_str()));
+
         let st = crate::isolation::self_command()
             .args([
                 "compose",
@@ -456,12 +473,11 @@ impl BuildChunkedOCIOpts {
                     .flat_map(|c| [OsStr::new("--image-config"), c.as_os_str()]),
             )
             .args([commitid.as_str(), self.output.as_str()])
-            .args(manifest_data.as_ref().iter().flat_map(|manifest| {
-                [
-                    OsStr::new("--previous-build-manifest"),
-                    manifest.as_os_str(),
-                ]
-            }))
+            .args(
+                manifest_path
+                    .iter()
+                    .flat_map(|manifest| [OsStr::new("--previous-build-manifest"), manifest]),
+            )
             .status()?;
         if !st.success() {
             anyhow::bail!("Failed to run compose container-encapsulate: {st:?}");
